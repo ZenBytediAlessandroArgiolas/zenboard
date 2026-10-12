@@ -155,7 +155,12 @@ ZenBoard può essere pubblicato con un indirizzo web pubblico mantenendo il back
 
 ### Script di automazione: `restart-tunnel.ps1`
 
-Per evitare di ripetere a mano tutti i passaggi, lo script `restart-tunnel.ps1` nella radice del progetto fa tutto con un comando: riavvia il tunnel Cloudflare, aggiorna `VITE_BACKEND_URL` su Vercel, pubblica un nuovo deploy via CLI (non dipende da GitHub, evitando eventuali rate-limit) e riaggancia il dominio personalizzato all'ultimo deploy.
+Per evitare di ripetere a mano tutti i passaggi, lo script `restart-tunnel.ps1` nella radice del progetto automatizza l'intero ciclo in un comando:
+1. Verifica che il backend Docker locale sia attivo (porta 3001).
+2. Controlla il tunnel Cloudflare (`cloudflared`): se è già attivo e funzionante lo mantiene, altrimenti ne avvia uno nuovo e ne estrae l'URL (`*.trycloudflare.com`).
+3. Aggiorna la variabile `VITE_BACKEND_URL` in Production su Vercel.
+4. Avvia la build su Vercel (sfruttando il Deploy Hook di produzione).
+5. Riaggancia automaticamente l'alias del dominio personalizzato (`zenboard.zenbyte.it`) all'ultimo deploy completato.
 
 ```powershell
 .\restart-tunnel.ps1
@@ -163,10 +168,51 @@ Per evitare di ripetere a mano tutti i passaggi, lo script `restart-tunnel.ps1` 
 
 Richiede nel file `.env` locale (mai committato):
 ```bash
-VERCEL_TOKEN=...   # Account Settings -> Tokens su vercel.com
-VERCEL_SCOPE=...   # Slug del team/account (visibile nell'URL del progetto Vercel)
+VERCEL_TOKEN=...           # Account Settings -> Tokens su vercel.com
+VERCEL_SCOPE=...           # Slug del team/account Vercel
+VERCEL_DEPLOY_HOOK_URL=... # Settings -> Git -> Deploy Hooks del progetto Vercel
 ```
 
-(Il dominio personalizzato da riagganciare, es. `zenboard.zenbyte.it`, è impostato direttamente in cima allo script nella variabile `$CustomDomain`.)
+---
 
-Usalo ogni volta che il sito pubblicato smette di connettersi al backend (segno che il tunnel è scaduto) — capita tipicamente dopo un riavvio del PC.
+## 📋 Guida Operativa Quotidiana: Avvio Backend e Riavvio Tunnel
+
+Quando accendi il computer o inizi una nuova sessione di lezione:
+
+### 1. Avvia il Backend su Docker
+Assicurati che Docker Desktop sia aperto e lancia dal terminale del progetto:
+
+```powershell
+docker compose up -d
+```
+> 💡 *Nota*: Se hai fatto modifiche al codice o alle dipendenze del backend e vuoi riavviarlo:
+> ```powershell
+> docker compose restart backend
+> ```
+
+### 2. Riavvia / Verifica il Tunnel Cloudflare verso Vercel
+Una volta attivo il backend su Docker, lancia:
+
+```powershell
+.\restart-tunnel.ps1
+```
+Lo script si occuperà di verificare la connettività, aggiornare Vercel e garantire che **`https://zenboard.zenbyte.it`** sia online e connesso al tuo computer.
+
+---
+
+## 📝 Registro Modifiche Recenti (Changelog)
+
+- **Architettura Multi-Stanza (Isolamento per Classe)**:
+  - Sostituita la lavagna globale singola con un sistema a stanze in memoria RAM (`Map<roomId, RoomState>`).
+  - Generazione automatica dello slug univoco dal nome lezione (es. *"Matematica 3A"* → `?lezione=matematica-3a`).
+  - Il codice stanza resta fisso per l'intera durata della lezione per non invalidare i link già inviati agli studenti.
+  - Pulizia automatica periodica delle stanze in RAM inattive da più di 72 ore.
+- **Supporto Google Drive Esteso**:
+  - Il salvataggio `.json` memorizza il `roomId` originale.
+  - All'apertura di una lezione da Drive, la stanza viene ripristinata con lo stesso codice stanza originario.
+- **Nuove Schermate e Flussi**:
+  - **Teacher Hub (`TeacherHub.jsx`)**: schermata iniziale per il docente che accede senza codice ("Nuova Lezione" o "Apri da Drive").
+  - **Guest Join Screen (`GuestJoinScreen.jsx`)**: schermata per ospiti con link non valido o lezione terminata/scaduta.
+- **Automazione Deploy e Tunnel Robusta**:
+  - Script `restart-tunnel.ps1` potenziato con rilevamento automatico del percorso di `cloudflared.exe`, health check del tunnel esistente, trigger via Deploy Hook e riaggancio automatico dell'alias dominio `zenboard.zenbyte.it`.
+
