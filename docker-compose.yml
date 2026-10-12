@@ -1,0 +1,64 @@
+services:
+  # -------------------------------------------------------------------
+  # Servizio Backend (Node.js + Express + Socket.io + FS Storage)
+  # -------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: zenboard_backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - DATA_DIR=/app/data
+      - NODE_ENV=development
+      # Accesso Premium (Docente) - vedi .env / .env.example
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-docente}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-zenboard2024}
+      - JWT_SECRET=${JWT_SECRET:-zenboard-secret-key-2024-change-in-production}
+      - JWT_EXPIRY=${JWT_EXPIRY:-24h}
+    volumes:
+      # Hot-reload del codice sorgente backend
+      - ./backend:/app
+      # Volume anonimo per preservare i node_modules Linux del container
+      - /app/node_modules
+      # ===================================================================
+      # VOLUME GOOGLE DRIVE (Approccio Zero-API Cloud)
+      # Mappa una cartella host (locale o sincronizzata da Google Drive Desktop)
+      # direttamente in /app/data del container backend.
+      # È possibile personalizzare GOOGLE_DRIVE_PATH nel file .env
+      # ===================================================================
+      - ${GOOGLE_DRIVE_PATH:-./data}:/app/data
+    command: npm run dev
+    networks:
+      - zenboard-network
+
+  # -------------------------------------------------------------------
+  # Servizio Frontend (React + Vite + Excalidraw + Socket.io-client)
+  # -------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: zenboard_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_BACKEND_URL=${VITE_BACKEND_URL:-http://localhost:3001}
+    volumes:
+      # Hot-reload del codice sorgente frontend
+      - ./frontend:/app
+      # Volume anonimo per preservare i node_modules Linux del container
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      - backend
+    networks:
+      - zenboard-network
+
+networks:
+  zenboard-network:
+    driver: bridge

@@ -1,0 +1,24 @@
+# Dipendenze
+node_modules/
+
+# Variabili d'ambiente (contengono credenziali e secret JWT)
+.env
+.env.local
+.env.*.local
+
+# Build di produzione
+frontend/dist/
+frontend/build/
+
+# Lezioni salvate dagli utenti (volume Google Drive / storage locale)
+data/*.json
+
+# Log
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
