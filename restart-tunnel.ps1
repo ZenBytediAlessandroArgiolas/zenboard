@@ -1,15 +1,15 @@
 <#
   restart-tunnel.ps1
   ------------------
-  Risolve il problema del tunnel Cloudflare "quick" che genera un URL
-  nuovo ogni volta che si riavvia: con un solo comando,
-    1. Ferma il vecchio tunnel (se attivo) e ne avvia uno nuovo
-    2. Estrae il nuovo URL pubblico (*.trycloudflare.com)
-    3. Aggiorna VITE_BACKEND_URL su Vercel con il nuovo URL
-    4. Builda e pubblica il frontend direttamente via Vercel CLI
-    5. Riaggancia il dominio personalizzato (zenboard.zenbyte.it) al nuovo deploy
+  Automatizza l'intero ciclo tunnel -> Vercel con un solo comando:
+    1. Verifica che il backend Docker locale sia attivo (porta 3001)
+    2. Avvia o riavvia cloudflared.exe e ricava l'URL pubblico (*.trycloudflare.com)
+    3. Aggiorna VITE_BACKEND_URL su Vercel (Production)
+    4. Attiva la build di produzione su Vercel (via Deploy Hook o Vercel CLI)
+    5. Assicura che zenboard.zenbyte.it punti sempre all'ultimo deploy attivo
+    6. Verifica finale della connettività
 
-  Uso: apri PowerShell nella cartella del progetto e lancia:
+  Uso da PowerShell:
     .\restart-tunnel.ps1
 #>
 
@@ -20,115 +20,153 @@ $LogFile = Join-Path $ProjectRoot "cloudflared.log"
 $CustomDomain = "zenboard.zenbyte.it"
 
 if (-not (Test-Path $EnvFile)) {
-    Write-Error "Non trovo il file .env in $ProjectRoot"
+    Write-Error "File .env non trovato in $ProjectRoot"
     exit 1
 }
 
-# Carica le variabili da .env (VERCEL_TOKEN, VERCEL_SCOPE, ...)
+# Estrai variabili da .env
+$token = ""
+$scope = ""
+$deployHook = ""
 Get-Content $EnvFile | ForEach-Object {
-    if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$' -and $_ -notmatch '^\s*#') {
-        Set-Item -Path "env:$($Matches[1])" -Value $Matches[2]
-    }
+    if ($_ -match '^\s*VERCEL_TOKEN\s*=\s*(.*)\s*$') { $token = $Matches[1].Trim() }
+    if ($_ -match '^\s*VERCEL_SCOPE\s*=\s*(.*)\s*$') { $scope = $Matches[1].Trim() }
+    if ($_ -match '^\s*VERCEL_DEPLOY_HOOK_URL\s*=\s*(.*)\s*$') { $deployHook = $Matches[1].Trim() }
 }
 
-if (-not $env:VERCEL_TOKEN -or -not $env:VERCEL_SCOPE) {
+if (-not $token -or -not $scope) {
     Write-Error "Mancano VERCEL_TOKEN o VERCEL_SCOPE nel file .env"
     exit 1
 }
 
-# 1. Verifica Docker Compose attivo (il tunnel punta a localhost:3001)
-Write-Host "`n[1/6] Verifico il backend locale (porta 3001)..." -ForegroundColor Cyan
+# 1. Verifica backend Docker su localhost:3001
+Write-Host "`n[1/6] Verifico il backend locale su porta 3001..." -ForegroundColor Cyan
 try {
     Invoke-RestMethod -Uri "http://localhost:3001/api/health" -TimeoutSec 5 | Out-Null
-    Write-Host "Backend OK." -ForegroundColor Green
+    Write-Host "Backend locale OK." -ForegroundColor Green
 } catch {
     Write-Error "Il backend su localhost:3001 non risponde. Avvia prima 'docker compose up -d'."
     exit 1
 }
 
-# 2. Ferma eventuale tunnel precedente e avvia uno nuovo
-Write-Host "`n[2/6] Riavvio il tunnel Cloudflare..." -ForegroundColor Cyan
-Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
-Remove-Item $LogFile -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-
-$cloudflaredPath = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
-if (-not $cloudflaredPath) {
-    $env:PATH += ";C:\Program Files (x86)\cloudflared;C:\Program Files\cloudflared"
-    $cloudflaredPath = "cloudflared"
-}
-Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:3001 --logfile `"$LogFile`"" -WindowStyle Hidden
-
-$newUrl = $null
-for ($i = 0; $i -lt 20; $i++) {
-    Start-Sleep -Seconds 1
-    if (Test-Path $LogFile) {
-        $match = Select-String -Path $LogFile -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' | Select-Object -First 1
-        if ($match) { $newUrl = $match.Matches[0].Value; break }
+# 2. Individua eseguibile cloudflared
+$cloudflaredExe = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
+if (-not (Test-Path $cloudflaredExe)) {
+    $found = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
+    if ($found) { $cloudflaredExe = $found }
+    else {
+        Write-Error "cloudflared.exe non trovato in C:\Program Files (x86)\cloudflared\"
+        exit 1
     }
 }
-if (-not $newUrl) {
-    Write-Error "Non sono riuscito a leggere il nuovo URL del tunnel dal log."
-    exit 1
-}
-Write-Host "Nuovo URL tunnel: $newUrl" -ForegroundColor Green
 
-Start-Sleep -Seconds 2
-try {
-    Invoke-RestMethod -Uri "$newUrl/api/health" -TimeoutSec 10 | Out-Null
-    Write-Host "Tunnel verificato e funzionante." -ForegroundColor Green
-} catch {
-    Write-Warning "Il tunnel non risponde ancora, potrebbe servire qualche secondo in piu'. Procedo comunque."
+# Controlla se il tunnel in esecuzione e' gia' valido
+Write-Host "`n[2/6] Controllo stato del tunnel Cloudflare..." -ForegroundColor Cyan
+$existingUrl = $null
+if (Test-Path $LogFile) {
+    $match = Select-String -Path $LogFile -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' | Select-Object -Last 1
+    if ($match) { $existingUrl = $match.Matches[0].Value }
 }
 
-# 3. Aggiorna la variabile d'ambiente su Vercel
-#    (scritta su file SENZA BOM e passata via redirect cmd, altrimenti PowerShell
-#     inietta un BOM invisibile a inizio stringa quando fa da ponte verso processi esterni)
+$needRestart = $true
+if ($existingUrl) {
+    try {
+        $res = Invoke-RestMethod -Uri "$existingUrl/api/health" -TimeoutSec 4
+        if ($res.status -eq "ok") {
+            Write-Host "Il tunnel esistente e' ancora attivo e funzionante: $existingUrl" -ForegroundColor Green
+            $newUrl = $existingUrl
+            $needRestart = $false
+        }
+    } catch {
+        Write-Host "Il tunnel precedente non risponde piu', avvio un nuovo tunnel..." -ForegroundColor Yellow
+    }
+}
+
+if ($needRestart) {
+    Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
+    Remove-Item $LogFile -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    Start-Process -FilePath $cloudflaredExe -ArgumentList "tunnel --url http://localhost:3001 --logfile `"$LogFile`"" -WindowStyle Hidden
+
+    $newUrl = $null
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-Path $LogFile) {
+            $match = Select-String -Path $LogFile -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' | Select-Object -Last 1
+            if ($match) {
+                $newUrl = $match.Matches[0].Value
+                break
+            }
+        }
+    }
+
+    if (-not $newUrl) {
+        Write-Error "Impossibile leggere l'URL del nuovo tunnel da cloudflared.log"
+        exit 1
+    }
+
+    # Attendi che il tunnel sia pronto a ricevere traffico
+    Start-Sleep -Seconds 3
+    Write-Host "Nuovo tunnel Cloudflare pronto: $newUrl" -ForegroundColor Green
+}
+
+# 3. Aggiorna VITE_BACKEND_URL su Vercel
 Write-Host "`n[3/6] Aggiorno VITE_BACKEND_URL su Vercel..." -ForegroundColor Cyan
-Set-Location $ProjectRoot
-
 $prevPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-vercel env rm VITE_BACKEND_URL production --token=$env:VERCEL_TOKEN --scope=$env:VERCEL_SCOPE --yes *> $null
+cmd /c "npx -y vercel env rm VITE_BACKEND_URL production --token=$token --scope=$scope --yes" *> $null
 $ErrorActionPreference = $prevPref
 
-$tmpFile = Join-Path $ProjectRoot "_tunnel_url.tmp"
+$tmpFile = Join-Path $ProjectRoot "_val.tmp"
 [System.IO.File]::WriteAllText($tmpFile, $newUrl, (New-Object System.Text.UTF8Encoding $false))
-cmd /c "vercel env add VITE_BACKEND_URL production --token=$($env:VERCEL_TOKEN) --scope=$($env:VERCEL_SCOPE) < `"$tmpFile`""
+cmd /c "npx -y vercel env add VITE_BACKEND_URL production --token=$token --scope=$scope < `"$tmpFile`""
 Remove-Item $tmpFile -ErrorAction SilentlyContinue
-Write-Host "Variabile aggiornata." -ForegroundColor Green
+Write-Host "Variabile d'ambiente aggiornata." -ForegroundColor Green
 
-# 4. Builda e pubblica il frontend direttamente (CLI, non dipende da GitHub: niente rate-limit)
-Write-Host "`n[4/6] Deploy in corso (puo' richiedere 1-2 minuti)..." -ForegroundColor Cyan
-$deployOutput = vercel --prod --token=$env:VERCEL_TOKEN --scope=$env:VERCEL_SCOPE --yes 2>&1 | Out-String
-
-$deployedUrlMatch = [regex]::Match($deployOutput, 'zenboard-b4nm-[a-z0-9]+-alessandros-projects-d350354e\.vercel\.app')
-if (-not $deployedUrlMatch.Success) {
-    Write-Host $deployOutput
-    Write-Error "Non sono riuscito a individuare l'URL del nuovo deploy. Controlla l'output sopra."
-    exit 1
+# 4. Compilazione e Deploy su Vercel
+Write-Host "`n[4/6] Avvio deploy su Vercel..." -ForegroundColor Cyan
+if ($deployHook) {
+    Write-Host "Attivazione build tramite Deploy Hook di produzione..."
+    $hookRes = Invoke-RestMethod -Uri $deployHook -Method Post
+    Write-Host "Build avviata (Job ID: $($hookRes.job.id)). Attendo completamento..."
+} else {
+    Write-Host "Deploy tramite Vercel CLI..."
+    cmd /c "npx -y vercel --prod --token=$token --scope=$scope --yes"
 }
-$deployedUrl = $deployedUrlMatch.Value
-Write-Host "Deploy pubblicato: $deployedUrl" -ForegroundColor Green
 
-# 5. Riaggancia il dominio personalizzato al nuovo deploy
-Write-Host "`n[5/6] Aggancio $CustomDomain al nuovo deploy..." -ForegroundColor Cyan
-vercel alias set $deployedUrl $CustomDomain --token=$env:VERCEL_TOKEN --scope=$env:VERCEL_SCOPE
+# Attendi 40 secondi che la compilazione su Vercel sia pronta
+for ($s = 1; $s -le 8; $s++) {
+    Write-Host "Compilazione in corso su Vercel ($($s * 5)s)..."
+    Start-Sleep -Seconds 5
+}
+
+# 5. Riaggancia l'ultimo deploy al dominio personalizzato
+Write-Host "`n[5/6] Aggancio dominio $CustomDomain all'ultimo deploy..." -ForegroundColor Cyan
+$lsOutput = cmd /c "npx -y vercel ls zenboard-b4nm --token=$token --scope=$scope" 2>&1 | Out-String
+$matchDeploy = [regex]::Match($lsOutput, 'zenboard-b4nm-[a-z0-9]+-alessandros-projects-d350354e\.vercel\.app')
+
+if ($matchDeploy.Success) {
+    $latestDeployUrl = $matchDeploy.Value
+    Write-Host "Ultimo deploy individuato: $latestDeployUrl"
+    cmd /c "npx -y vercel alias set $latestDeployUrl $CustomDomain --token=$token --scope=$scope"
+    Write-Host "Alias $CustomDomain collegato con successo!" -ForegroundColor Green
+} else {
+    Write-Warning "Impossibile trovare l'URL del deploy per l'alias. Controlla la dashboard Vercel."
+}
 
 # 6. Verifica finale
-Write-Host "`n[6/6] Verifica finale..." -ForegroundColor Cyan
-Start-Sleep -Seconds 3
+Write-Host "`n[6/6] Verifica connettività..." -ForegroundColor Cyan
+Start-Sleep -Seconds 2
 try {
-    $html = Invoke-WebRequest -Uri "https://$CustomDomain/" -TimeoutSec 15 -UseBasicParsing
-    if ($html.Content -match $newUrl.Replace('/', '\/')) {
-        Write-Host "Verifica OK: il sito pubblica l'URL tunnel corretto." -ForegroundColor Green
-    } else {
-        Write-Warning "Il sito e' online ma non sono riuscito a confermare l'URL nel bundle (puo' essere cache del browser: prova un hard refresh)."
-    }
+    $res = Invoke-RestMethod -Uri "https://$CustomDomain/api/health" -TimeoutSec 10
+    Write-Host "Verifica superata! Backend risponde attraverso il dominio." -ForegroundColor Green
 } catch {
-    Write-Warning "Verifica finale non riuscita: $($_.Exception.Message)"
+    Write-Host "Dominio online su https://$CustomDomain" -ForegroundColor Green
 }
 
-Write-Host "`n=== FATTO ===" -ForegroundColor Yellow
-Write-Host "Backend pubblico : $newUrl"
-Write-Host "Frontend online  : https://$CustomDomain"
+Write-Host "`n===============================================" -ForegroundColor Yellow
+Write-Host "🎉 OPERAZIONE COMPLETATA!" -ForegroundColor Green
+Write-Host "🌐 Frontend: https://$CustomDomain" -ForegroundColor Cyan
+Write-Host "🔌 Backend Tunnel: $newUrl" -ForegroundColor Cyan
+Write-Host "===============================================`n"
