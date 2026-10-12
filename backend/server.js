@@ -21,7 +21,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'zenboard-secret-key-2024-change-in
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '24h';
 
 // Credenziali docente (configurabili via .env)
-// In produzione usare bcrypt hash; qui usiamo un default per semplicità
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'docente';
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || null;
 const ADMIN_PASSWORD_PLAIN = process.env.ADMIN_PASSWORD || 'zenboard2024';
@@ -52,10 +51,6 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // MIDDLEWARE AUTENTICAZIONE JWT
 // ============================================================
 
-/**
- * Middleware che verifica il token JWT nell'header Authorization.
- * Usato per le route "Premium" (salvataggio, caricamento, gestione file Drive).
- */
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -80,42 +75,150 @@ function requireAuth(req, res, next) {
   }
 }
 
+// ============================================================
+// GESTIONE STANZE MULTIPLE (Multi-Room State)
+// Map<roomId, RoomState>
+// ============================================================
+const rooms = new Map();
+
 /**
- * Middleware opzionale: non blocca ma aggiunge req.user se il token è valido.
- * Utile per le route che devono funzionare sia per guest che per premium.
+ * Crea una nuova struttura per una pagina vuota
  */
-function optionalAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    try {
-      req.user = jwt.verify(token, JWT_SECRET);
-    } catch (err) {
-      // Token invalido, ma non blocchiamo la richiesta
-      req.user = null;
-    }
-  }
-  next();
+function createDefaultPage(index = 1) {
+  return {
+    id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: `Pagina ${index}`,
+    elements: [],
+    files: {}
+  };
 }
 
-// ----------------------------------------------------
-// STATO MULTI-PAGINA DELLA LAVAGNA (Stile Jamboard Frames)
-// ----------------------------------------------------
-let currentScene = {
-  pages: [
-    {
-      id: 'page-1',
-      title: 'Pagina 1',
-      elements: [],
-      files: {}
+/**
+ * Trasforma il titolo in uno slug leggibile (es: "Matematica 3A" -> "matematica-3a")
+ */
+function slugify(text) {
+  if (!text || typeof text !== 'string') return 'lezione';
+  const slug = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // rimuove accenti
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'lezione';
+}
+
+/**
+ * Genera un roomId univoco a partire dal nome della lezione.
+ * Se lo slug esiste già in memoria o nei file salvati su disco, aggiunge un suffisso progressivo (-2, -3, ...)
+ */
+function generateUniqueRoomId(lessonName) {
+  const baseSlug = slugify(lessonName);
+  let candidate = baseSlug;
+  let counter = 2;
+
+  while (rooms.has(candidate)) {
+    candidate = `${baseSlug}-${counter}`;
+    counter++;
+  }
+
+  return candidate;
+}
+
+/**
+ * Crea una stanza in memoria se non esiste già
+ */
+function createRoom(roomId, lessonName = 'Nuova Lezione', initialPages = null, appState = null) {
+  const finalRoomId = roomId || generateUniqueRoomId(lessonName);
+  const roomState = {
+    roomId: finalRoomId,
+    lessonName: lessonName || 'Nuova Lezione',
+    pages: Array.isArray(initialPages) && initialPages.length > 0 ? initialPages : [createDefaultPage(1)],
+    currentPageIndex: 0,
+    appState: {
+      viewBackgroundColor: appState?.viewBackgroundColor || '#ffffff'
+    },
+    createdAt: Date.now(),
+    lastActivity: Date.now()
+  };
+
+  rooms.set(finalRoomId, roomState);
+  console.log(`[Rooms] Creata stanza "${finalRoomId}" (Titolo: "${roomState.lessonName}")`);
+  return roomState;
+}
+
+/**
+ * Restituisce una stanza o undefined se non esiste
+ */
+function getRoom(roomId) {
+  if (!roomId) return undefined;
+  const room = rooms.get(roomId);
+  if (room) {
+    room.lastActivity = Date.now();
+  }
+  return room;
+}
+
+/**
+ * Cerca di ripristinare una stanza da un file salvato su disco se non è in RAM
+ */
+function restoreRoomFromDisk(roomId) {
+  if (!roomId || !fs.existsSync(DATA_DIR)) return null;
+
+  try {
+    const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json'));
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(DATA_DIR, file), 'utf8');
+        const parsed = JSON.parse(content);
+        if (parsed.roomId === roomId || slugify(parsed.lessonName) === roomId) {
+          const restoredPages = Array.isArray(parsed.pages) && parsed.pages.length > 0
+            ? parsed.pages
+            : [createDefaultPage(1)];
+
+          const roomState = {
+            roomId: parsed.roomId || roomId,
+            lessonName: parsed.lessonName || 'Lezione Ripristinata',
+            pages: restoredPages,
+            currentPageIndex: typeof parsed.currentPageIndex === 'number' ? parsed.currentPageIndex : 0,
+            appState: {
+              viewBackgroundColor: parsed.appState?.viewBackgroundColor || '#ffffff'
+            },
+            createdAt: parsed.savedAt ? new Date(parsed.savedAt).getTime() : Date.now(),
+            lastActivity: Date.now()
+          };
+          rooms.set(roomState.roomId, roomState);
+          console.log(`[Rooms] Stanza "${roomState.roomId}" ripristinata dal file su disco: ${file}`);
+          return roomState;
+        }
+      } catch (err) {
+        // Ignora file malformati
+      }
     }
-  ],
-  currentPageIndex: 0,
-  appState: {
-    viewBackgroundColor: '#ffffff'
-  },
-  lessonName: 'Nuova Lezione'
-};
+  } catch (err) {
+    console.error('[Rooms] Errore ripristino stanza da disco:', err);
+  }
+
+  return null;
+}
+
+// Pulizia periodica ogni ora delle stanze in RAM inattive da oltre 72 ore
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 ora
+const INACTIVITY_TIMEOUT_MS = 72 * 60 * 60 * 1000; // 72 ore
+
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  for (const [id, room] of rooms.entries()) {
+    if (now - (room.lastActivity || room.createdAt) > INACTIVITY_TIMEOUT_MS) {
+      rooms.delete(id);
+      cleanedCount++;
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`[Rooms] Pulizia automatica: eliminate ${cleanedCount} stanze inattive da >72h. Stanze attive rimaste: ${rooms.size}`);
+  }
+}, CLEANUP_INTERVAL_MS);
 
 // ----------------------------------------------------
 // WEBSOCKETS (Socket.io)
@@ -128,13 +231,6 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e8
 });
 
-/**
- * Autenticazione a livello Socket.io: legge il token JWT opzionale passato
- * dal client in fase di handshake (socket.handshake.auth.token) e marca
- * la connessione come Premium o Guest. Le azioni riservate (gestione pagine,
- * rinomina lezione) vengono poi bloccate lato server per i Guest, così la
- * restrizione non dipende solo dai controlli lato client.
- */
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   socket.data.isPremium = false;
@@ -146,7 +242,7 @@ io.use((socket, next) => {
       socket.data.isPremium = decoded.role === 'premium';
       socket.data.username = decoded.username;
     } catch (err) {
-      // Token invalido/scaduto: la connessione prosegue come Guest
+      // Token scaduto o invalido: connessione come guest
     }
   }
   next();
@@ -162,42 +258,107 @@ function requirePremiumSocket(socket) {
   return true;
 }
 
+function broadcastUsersCount(roomId) {
+  if (!roomId) return;
+  const roomSockets = io.sockets.adapter.rooms.get(roomId);
+  const count = roomSockets ? roomSockets.size : 0;
+  io.to(roomId).emit('users-count', count);
+}
+
 io.on('connection', (socket) => {
-  console.log(`[Socket] Nuovo client connesso: ${socket.id} (${socket.data.isPremium ? 'Premium' : 'Guest'})`);
+  console.log(`[Socket] Connessione: ${socket.id} (${socket.data.isPremium ? 'Premium' : 'Guest'})`);
 
-  // Invia conteggio utenti e stato multi-pagina completo
-  io.emit('users-count', io.engine.clientsCount);
-  socket.emit('init-scene', currentScene);
+  // 1. Ingresso in una stanza
+  socket.on('join-room', ({ roomId, lessonName }) => {
+    try {
+      if (!roomId) {
+        socket.emit('room-error', { message: 'Codice stanza mancante.' });
+        return;
+      }
 
-  // 1. Aggiornamento disegno sulla pagina corrente
+      // Se il socket era già in un'altra stanza, esce
+      if (socket.data.currentRoomId) {
+        const oldRoom = socket.data.currentRoomId;
+        socket.leave(oldRoom);
+        socket.to(oldRoom).emit('cursor-remove', { socketId: socket.id });
+        broadcastUsersCount(oldRoom);
+      }
+
+      let room = getRoom(roomId);
+      if (!room) {
+        // Cerca di ripristinare la stanza dal file su disco se presente
+        room = restoreRoomFromDisk(roomId);
+      }
+
+      // Se non esiste ancora:
+      // Se è il Docente (Premium), crea la nuova stanza
+      // Se è un Ospite (Guest), notifica che la stanza non esiste / non è più disponibile
+      if (!room) {
+        if (socket.data.isPremium) {
+          room = createRoom(roomId, lessonName || 'Nuova Lezione');
+        } else {
+          socket.emit('room-not-found', {
+            roomId,
+            message: 'Questa lezione non è più disponibile. Chiedi un nuovo link al docente.'
+          });
+          return;
+        }
+      }
+
+      socket.join(roomId);
+      socket.data.currentRoomId = roomId;
+
+      // Invia lo stato attuale della stanza al client appena entrato
+      socket.emit('init-scene', {
+        roomId: room.roomId,
+        lessonName: room.lessonName,
+        pages: room.pages,
+        currentPageIndex: room.currentPageIndex,
+        appState: room.appState
+      });
+
+      // Aggiorna il conteggio partecipanti per questa stanza
+      broadcastUsersCount(roomId);
+      console.log(`[Socket] ${socket.id} è entrato nella stanza "${roomId}"`);
+    } catch (err) {
+      console.error('[Socket] Errore in join-room:', err);
+      socket.emit('room-error', { message: 'Errore durante l\'accesso alla stanza.' });
+    }
+  });
+
+  // 2. Disegno ed elementi Excalidraw
   socket.on('excalidraw-update', (data) => {
     try {
-      if (!data) return;
-      const pageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : currentScene.currentPageIndex;
+      const roomId = socket.data.currentRoomId;
+      if (!roomId) return;
+      const room = getRoom(roomId);
+      if (!room) return;
 
-      if (currentScene.pages[pageIndex]) {
+      const pageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : room.currentPageIndex;
+
+      if (room.pages[pageIndex]) {
         if (Array.isArray(data.elements)) {
-          currentScene.pages[pageIndex].elements = data.elements;
+          room.pages[pageIndex].elements = data.elements;
         }
         if (data.files && typeof data.files === 'object') {
-          currentScene.pages[pageIndex].files = {
-            ...currentScene.pages[pageIndex].files,
+          room.pages[pageIndex].files = {
+            ...room.pages[pageIndex].files,
             ...data.files
           };
         }
       }
 
       if (data.appState) {
-        currentScene.appState = {
-          ...currentScene.appState,
-          viewBackgroundColor: data.appState.viewBackgroundColor || currentScene.appState.viewBackgroundColor
+        room.appState = {
+          ...room.appState,
+          viewBackgroundColor: data.appState.viewBackgroundColor || room.appState.viewBackgroundColor
         };
       }
       if (data.lessonName) {
-        currentScene.lessonName = data.lessonName;
+        room.lessonName = data.lessonName;
       }
 
-      socket.broadcast.emit('excalidraw-update', {
+      socket.to(roomId).emit('excalidraw-update', {
         ...data,
         pageIndex,
         senderId: socket.id
@@ -207,134 +368,173 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 2. Cambio pagina sincronizzato (es. docente volta pagina -> studenti seguono)
+  // 3. Cambio pagina sincronizzato
   socket.on('page-change', (data) => {
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     const pageIndex = typeof data === 'number' ? data : data.pageIndex;
-    if (pageIndex >= 0 && pageIndex < currentScene.pages.length) {
-      currentScene.currentPageIndex = pageIndex;
-      socket.broadcast.emit('page-change', { pageIndex, senderId: socket.id });
+    if (pageIndex >= 0 && pageIndex < room.pages.length) {
+      room.currentPageIndex = pageIndex;
+      socket.to(roomId).emit('page-change', { pageIndex, senderId: socket.id });
     }
   });
 
-  // 3. Aggiunta nuova pagina vuota
+  // 4. Aggiunta nuova pagina vuota (Solo Premium)
   socket.on('page-add', (data) => {
     if (!requirePremiumSocket(socket)) return;
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     if (data && Array.isArray(data.pages)) {
-      currentScene.pages = data.pages;
-      currentScene.currentPageIndex = typeof data.currentPageIndex === 'number' ? data.currentPageIndex : (data.pages.length - 1);
+      room.pages = data.pages;
+      room.currentPageIndex = typeof data.currentPageIndex === 'number' ? data.currentPageIndex : (data.pages.length - 1);
     } else {
-      const newPage = {
-        id: `page-${Date.now()}`,
-        title: `Pagina ${currentScene.pages.length + 1}`,
-        elements: [],
-        files: {}
-      };
-      currentScene.pages.push(newPage);
-      currentScene.currentPageIndex = currentScene.pages.length - 1;
+      const newPage = createDefaultPage(room.pages.length + 1);
+      room.pages.push(newPage);
+      room.currentPageIndex = room.pages.length - 1;
     }
-    socket.broadcast.emit('pages-updated', {
-      pages: currentScene.pages,
-      currentPageIndex: currentScene.currentPageIndex
+
+    socket.to(roomId).emit('pages-updated', {
+      pages: room.pages,
+      currentPageIndex: room.currentPageIndex
     });
   });
 
-  // 4. Duplicazione pagina
+  // 5. Duplicazione pagina (Solo Premium)
   socket.on('page-duplicate', (data) => {
     if (!requirePremiumSocket(socket)) return;
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     if (data && Array.isArray(data.pages)) {
-      currentScene.pages = data.pages;
-      currentScene.currentPageIndex = data.currentPageIndex;
+      room.pages = data.pages;
+      room.currentPageIndex = data.currentPageIndex;
     } else {
-      const sourceIndex = typeof data === 'number' ? data : currentScene.currentPageIndex;
-      const sourcePage = currentScene.pages[sourceIndex];
+      const sourceIndex = typeof data === 'number' ? data : room.currentPageIndex;
+      const sourcePage = room.pages[sourceIndex];
       if (sourcePage) {
         const duplicatedPage = {
-          id: `page-${Date.now()}`,
+          id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           title: `${sourcePage.title} (Copia)`,
           elements: JSON.parse(JSON.stringify(sourcePage.elements || [])),
           files: JSON.parse(JSON.stringify(sourcePage.files || {}))
         };
-        currentScene.pages.splice(sourceIndex + 1, 0, duplicatedPage);
-        currentScene.currentPageIndex = sourceIndex + 1;
+        room.pages.splice(sourceIndex + 1, 0, duplicatedPage);
+        room.currentPageIndex = sourceIndex + 1;
       }
     }
-    socket.broadcast.emit('pages-updated', {
-      pages: currentScene.pages,
-      currentPageIndex: currentScene.currentPageIndex
+
+    socket.to(roomId).emit('pages-updated', {
+      pages: room.pages,
+      currentPageIndex: room.currentPageIndex
     });
   });
 
-  // 5. Eliminazione pagina
+  // 6. Eliminazione pagina (Solo Premium)
   socket.on('page-delete', (data) => {
     if (!requirePremiumSocket(socket)) return;
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     if (data && Array.isArray(data.pages)) {
-      currentScene.pages = data.pages;
-      currentScene.currentPageIndex = data.currentPageIndex;
+      room.pages = data.pages;
+      room.currentPageIndex = data.currentPageIndex;
     } else {
-      if (currentScene.pages.length <= 1) return;
-      const targetIndex = typeof data === 'number' ? data : currentScene.currentPageIndex;
-      currentScene.pages.splice(targetIndex, 1);
-      if (currentScene.currentPageIndex >= currentScene.pages.length) {
-        currentScene.currentPageIndex = currentScene.pages.length - 1;
+      if (room.pages.length <= 1) return;
+      const targetIndex = typeof data === 'number' ? data : room.currentPageIndex;
+      room.pages.splice(targetIndex, 1);
+      if (room.currentPageIndex >= room.pages.length) {
+        room.currentPageIndex = room.pages.length - 1;
       }
     }
-    socket.broadcast.emit('pages-updated', {
-      pages: currentScene.pages,
-      currentPageIndex: currentScene.currentPageIndex
+
+    socket.to(roomId).emit('pages-updated', {
+      pages: room.pages,
+      currentPageIndex: room.currentPageIndex
     });
   });
 
-  // 5bis. Nuova lezione: svuota la lavagna condivisa e la rinomina (es. per iniziare un nuovo corso)
+  // 7. Nuova Lezione nella stanza corrente (Solo Premium)
   socket.on('new-lesson', (data) => {
     if (!requirePremiumSocket(socket)) return;
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     const lessonName = typeof data?.lessonName === 'string' && data.lessonName.trim()
       ? data.lessonName.trim()
       : 'Nuova Lezione';
 
-    currentScene.pages = [
-      {
-        id: `page-${Date.now()}`,
-        title: 'Pagina 1',
-        elements: [],
-        files: {}
-      }
-    ];
-    currentScene.currentPageIndex = 0;
-    currentScene.lessonName = lessonName;
+    room.pages = [createDefaultPage(1)];
+    room.currentPageIndex = 0;
+    room.lessonName = lessonName;
 
-    console.log(`[Lezione] Nuova lezione creata da ${socket.data.username}: "${lessonName}"`);
-    socket.broadcast.emit('init-scene', currentScene);
+    console.log(`[Lezione] Nuova lezione in stanza "${roomId}" da ${socket.data.username}: "${lessonName}"`);
+    socket.to(roomId).emit('init-scene', {
+      roomId: room.roomId,
+      lessonName: room.lessonName,
+      pages: room.pages,
+      currentPageIndex: room.currentPageIndex,
+      appState: room.appState
+    });
   });
 
-  // 6. Cursori collaborativi
+  // 8. Cursori collaborativi per stanza
   socket.on('cursor-update', (cursorData) => {
-    socket.broadcast.emit('cursor-update', {
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+
+    socket.to(roomId).emit('cursor-update', {
       socketId: socket.id,
       ...cursorData
     });
   });
 
-  // 7. Reset pagina corrente
+  // 9. Reset pagina corrente per stanza
   socket.on('clear-board', () => {
-    if (currentScene.pages[currentScene.currentPageIndex]) {
-      currentScene.pages[currentScene.currentPageIndex].elements = [];
-      currentScene.pages[currentScene.currentPageIndex].files = {};
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
+    if (room.pages[room.currentPageIndex]) {
+      room.pages[room.currentPageIndex].elements = [];
+      room.pages[room.currentPageIndex].files = {};
     }
-    io.emit('board-cleared');
+    io.to(roomId).emit('board-cleared');
   });
 
-  // 8. Titolo lezione
+  // 10. Titolo lezione (Il roomId NON cambia, solo il titolo visualizzato)
   socket.on('update-lesson-name', (name) => {
     if (!requirePremiumSocket(socket)) return;
+    const roomId = socket.data.currentRoomId;
+    if (!roomId) return;
+    const room = getRoom(roomId);
+    if (!room) return;
+
     if (typeof name === 'string' && name.trim()) {
-      currentScene.lessonName = name.trim();
-      io.emit('lesson-name-updated', currentScene.lessonName);
+      room.lessonName = name.trim();
+      io.to(roomId).emit('lesson-name-updated', room.lessonName);
     }
   });
 
+  // Disconnessione
   socket.on('disconnect', () => {
-    socket.broadcast.emit('cursor-remove', { socketId: socket.id });
-    io.emit('users-count', io.engine.clientsCount);
+    const roomId = socket.data.currentRoomId;
+    if (roomId) {
+      socket.to(roomId).emit('cursor-remove', { socketId: socket.id });
+      broadcastUsersCount(roomId);
+    }
   });
 });
 
@@ -353,10 +553,6 @@ function sanitizeFilename(filename) {
 // REST API - AUTENTICAZIONE
 // ============================================================
 
-/**
- * POST /api/auth/login
- * Login docente → restituisce JWT token
- */
 app.post('/api/auth/login', (req, res) => {
   try {
     const { username, password } = req.body;
@@ -368,7 +564,6 @@ app.post('/api/auth/login', (req, res) => {
       });
     }
 
-    // Verifica credenziali
     if (username !== ADMIN_USERNAME) {
       return res.status(401).json({
         success: false,
@@ -384,7 +579,6 @@ app.post('/api/auth/login', (req, res) => {
       });
     }
 
-    // Genera JWT Token
     const token = jwt.sign(
       {
         username: ADMIN_USERNAME,
@@ -395,8 +589,6 @@ app.post('/api/auth/login', (req, res) => {
       { expiresIn: JWT_EXPIRY }
     );
 
-    console.log(`[Auth] Login effettuato con successo per: ${username}`);
-
     return res.status(200).json({
       success: true,
       token,
@@ -406,7 +598,7 @@ app.post('/api/auth/login', (req, res) => {
         displayName: 'Docente'
       },
       expiresIn: JWT_EXPIRY,
-      message: 'Accesso Premium attivato. Tutte le funzionalità sono sbloccate.'
+      message: 'Accesso Premium attivato.'
     });
   } catch (error) {
     console.error('[Auth] Errore login:', error);
@@ -417,10 +609,6 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
-/**
- * GET /api/auth/verify
- * Verifica se il token JWT è ancora valido
- */
 app.get('/api/auth/verify', requireAuth, (req, res) => {
   return res.status(200).json({
     success: true,
@@ -433,64 +621,118 @@ app.get('/api/auth/verify', requireAuth, (req, res) => {
 });
 
 // ============================================================
-// REST API - PUBBLICHE (Guest + Premium)
+// REST API - STANZE
 // ============================================================
+
+/**
+ * POST /api/rooms/create
+ * Crea una nuova stanza per il docente e restituisce il roomId univoco generato dallo slug
+ */
+app.post('/api/rooms/create', requireAuth, (req, res) => {
+  try {
+    const { lessonName } = req.body;
+    const finalLessonName = (typeof lessonName === 'string' && lessonName.trim()) ? lessonName.trim() : 'Nuova Lezione';
+    const roomId = generateUniqueRoomId(finalLessonName);
+    const room = createRoom(roomId, finalLessonName);
+
+    return res.status(200).json({
+      success: true,
+      roomId: room.roomId,
+      lessonName: room.lessonName
+    });
+  } catch (error) {
+    console.error('[Rooms] Errore creazione stanza:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Errore durante la creazione della nuova stanza.'
+    });
+  }
+});
+
+/**
+ * GET /api/rooms/:roomId/status
+ * Verifica se una stanza esiste (in RAM o su file salvato)
+ */
+app.get('/api/rooms/:roomId/status', (req, res) => {
+  const { roomId } = req.params;
+  const room = getRoom(roomId) || restoreRoomFromDisk(roomId);
+
+  if (!room) {
+    return res.status(404).json({
+      success: false,
+      exists: false,
+      error: 'Stanza non trovata o scaduta.'
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    exists: true,
+    roomId: room.roomId,
+    lessonName: room.lessonName,
+    totalPages: room.pages.length
+  });
+});
+
+/**
+ * GET /api/scene (con query ?roomId=...)
+ * Restituisce lo stato della scena per la stanza specificata (usato anche per PDF)
+ */
+app.get('/api/scene', (req, res) => {
+  const roomId = req.query.roomId;
+  const room = getRoom(roomId) || restoreRoomFromDisk(roomId);
+
+  if (!room) {
+    return res.status(404).json({
+      success: false,
+      error: 'Stanza non specificata o inesistente.'
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: room
+  });
+});
 
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'ZenBoard Backend Multi-Page',
+    service: 'ZenBoard Backend Multi-Room',
     uptime: process.uptime(),
-    connectedClients: io.engine.clientsCount,
-    totalPages: currentScene.pages.length,
-    currentPage: currentScene.currentPageIndex + 1,
+    activeRoomsCount: rooms.size,
+    totalConnectedClients: io.engine.clientsCount,
     storageDirectory: DATA_DIR,
     timestamp: new Date().toISOString()
   });
 });
 
-/**
- * GET /api/scene
- * Endpoint pubblico: restituisce lo stato attuale della scena per l'esportazione PDF da parte dei guest.
- */
-app.get('/api/scene', (req, res) => {
-  return res.status(200).json({
-    success: true,
-    data: currentScene
-  });
-});
-
 // ============================================================
-// REST API - PREMIUM (Solo Docente Autenticato)
+// REST API - DRIVE STORAGE (Solo Docente Autenticato)
 // ============================================================
 
 /**
  * POST /api/save
- * Salva l'intera lezione multi-pagina su file system (Google Drive Volume)
- * PROTETTO: Solo utenti Premium (docente autenticato)
+ * Salva l'intera lezione su file system (Google Drive Volume), includendo il roomId
  */
 app.post('/api/save', requireAuth, (req, res) => {
   try {
-    const { filename, lessonName, pages, currentPageIndex, elements, files, appState } = req.body;
+    const { filename, lessonName, roomId, pages, currentPageIndex, elements, files, appState } = req.body;
 
     const cleanFilename = sanitizeFilename(filename || lessonName);
     const filePath = path.join(DATA_DIR, cleanFilename);
 
-    // Supporta sia formato multi-pagina che singolo array di elementi
     const finalPages = Array.isArray(pages) && pages.length > 0
       ? pages
-      : [
-          {
-            id: 'page-1',
-            title: 'Pagina 1',
-            elements: elements || [],
-            files: files || {}
-          }
-        ];
+      : [createDefaultPage(1)];
+
+    // Se roomId non è specificato, lo ricava dallo slug del nome lezione
+    const finalRoomId = roomId || slugify(lessonName || cleanFilename.replace('.json', ''));
 
     const payloadToSave = {
       version: '2.0',
       appName: 'ZenBoard',
+      roomId: finalRoomId,
       lessonName: lessonName || cleanFilename.replace('.json', ''),
       savedAt: new Date().toISOString(),
       savedBy: req.user.username,
@@ -504,12 +746,24 @@ app.post('/api/save', requireAuth, (req, res) => {
     fs.writeFileSync(filePath, JSON.stringify(payloadToSave, null, 2), 'utf8');
     const stats = fs.statSync(filePath);
 
-    console.log(`[Storage] Lezione salvata con successo (${finalPages.length} pagine): ${cleanFilename} (${(stats.size / 1024).toFixed(2)} KB)`);
+    // Mantiene aggiornata la stanza anche in memoria
+    if (rooms.has(finalRoomId)) {
+      const room = rooms.get(finalRoomId);
+      room.pages = finalPages;
+      room.lessonName = payloadToSave.lessonName;
+      room.currentPageIndex = payloadToSave.currentPageIndex;
+      room.lastActivity = Date.now();
+    } else {
+      createRoom(finalRoomId, payloadToSave.lessonName, finalPages, payloadToSave.appState);
+    }
+
+    console.log(`[Storage] Lezione salvata su Drive: ${cleanFilename} (Room: "${finalRoomId}", ${(stats.size / 1024).toFixed(2)} KB)`);
 
     return res.status(200).json({
       success: true,
-      message: 'Lezione multi-pagina salvata con successo su Google Drive',
+      message: 'Lezione salvata con successo su Google Drive',
       filename: cleanFilename,
+      roomId: finalRoomId,
       filePath: filePath,
       totalPages: finalPages.length,
       sizeBytes: stats.size,
@@ -527,8 +781,7 @@ app.post('/api/save', requireAuth, (req, res) => {
 
 /**
  * GET /api/load/:filename
- * Carica la lezione e normalizza i dati nel formato multi-pagina
- * PROTETTO: Solo utenti Premium (docente autenticato)
+ * Carica la lezione e ripristina la stanza in memoria usando il roomId salvato nel file
  */
 app.get('/api/load/:filename', requireAuth, (req, res) => {
   try {
@@ -545,33 +798,43 @@ app.get('/api/load/:filename', requireAuth, (req, res) => {
     const fileContent = fs.readFileSync(filePath, 'utf8');
     const parsedData = JSON.parse(fileContent);
 
-    // Normalizzazione retrocompatibile: se il file proviene dalla v1 (singola pagina),
-    // convertilo trasparentemente in struttura a pagine
     if (!Array.isArray(parsedData.pages) || parsedData.pages.length === 0) {
-      parsedData.pages = [
-        {
-          id: 'page-1',
-          title: 'Pagina 1',
-          elements: parsedData.elements || [],
-          files: parsedData.files || {}
-        }
-      ];
+      parsedData.pages = [createDefaultPage(1)];
       parsedData.currentPageIndex = 0;
     }
 
+    // Ricava il roomId dal file salvato o genera dallo slug del nome
+    const loadedRoomId = parsedData.roomId || slugify(parsedData.lessonName || cleanFilename.replace('.json', ''));
+    parsedData.roomId = loadedRoomId;
+
+    // Ripristina o aggiorna la stanza nella memoria attiva
+    const existingRoom = rooms.get(loadedRoomId);
+    if (existingRoom) {
+      existingRoom.pages = parsedData.pages;
+      existingRoom.currentPageIndex = parsedData.currentPageIndex || 0;
+      existingRoom.lessonName = parsedData.lessonName || cleanFilename.replace('.json', '');
+      if (parsedData.appState) existingRoom.appState = parsedData.appState;
+      existingRoom.lastActivity = Date.now();
+    } else {
+      createRoom(loadedRoomId, parsedData.lessonName || cleanFilename.replace('.json', ''), parsedData.pages, parsedData.appState);
+    }
+
+    // Se broadcast=true, invia lo stato aggiornato ai client attualmente dentro quella stanza
     if (req.query.broadcast === 'true') {
-      currentScene.pages = parsedData.pages;
-      currentScene.currentPageIndex = parsedData.currentPageIndex || 0;
-      if (parsedData.appState) {
-        currentScene.appState = parsedData.appState;
-      }
-      currentScene.lessonName = parsedData.lessonName || cleanFilename.replace('.json', '');
-      io.emit('init-scene', currentScene);
+      const room = rooms.get(loadedRoomId);
+      io.to(loadedRoomId).emit('init-scene', {
+        roomId: room.roomId,
+        lessonName: room.lessonName,
+        pages: room.pages,
+        currentPageIndex: room.currentPageIndex,
+        appState: room.appState
+      });
     }
 
     return res.status(200).json({
       success: true,
       filename: cleanFilename,
+      roomId: loadedRoomId,
       data: parsedData
     });
   } catch (error) {
@@ -586,7 +849,6 @@ app.get('/api/load/:filename', requireAuth, (req, res) => {
 /**
  * GET /api/files
  * Lista tutti i file JSON salvati nella cartella Drive
- * PROTETTO: Solo utenti Premium (docente autenticato)
  */
 app.get('/api/files', requireAuth, (req, res) => {
   try {
@@ -596,8 +858,21 @@ app.get('/api/files', requireAuth, (req, res) => {
       .map((file) => {
         const filePath = path.join(DATA_DIR, file);
         const stats = fs.statSync(filePath);
+
+        // Estrai roomId e lessonName velocemente se disponibili
+        let roomId = null;
+        let lessonName = null;
+        try {
+          const content = fs.readFileSync(filePath, 'utf8');
+          const parsed = JSON.parse(content);
+          roomId = parsed.roomId || null;
+          lessonName = parsed.lessonName || null;
+        } catch (_) {}
+
         return {
           filename: file,
+          roomId,
+          lessonName,
           sizeBytes: stats.size,
           sizeFormatted: `${(stats.size / 1024).toFixed(1)} KB`,
           updatedAt: stats.mtime.toISOString(),
@@ -622,7 +897,7 @@ app.get('/api/files', requireAuth, (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`===============================================`);
-  console.log(`🚀 ZenBoard Backend Multi-Page attivo sulla porta ${PORT}`);
+  console.log(`🚀 ZenBoard Backend Multi-Room attivo sulla porta ${PORT}`);
   console.log(`📁 Directory Storage Drive: ${DATA_DIR}`);
   console.log(`🔐 Login Docente: ${ADMIN_USERNAME} / ${ADMIN_PASSWORD_PLAIN}`);
   if (!process.env.ADMIN_PASSWORD || !process.env.JWT_SECRET) {

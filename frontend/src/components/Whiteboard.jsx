@@ -29,12 +29,17 @@ const getRandomCollaboratorColor = () => {
   return colors[Math.floor(Math.random() * colors.length)];
 };
 
-export default function Whiteboard() {
-  const { isPremium, isGuest, authFetch, user, token, logout } = useAuth();
+export default function Whiteboard({
+  roomId: initialRoomId,
+  onRoomChange,
+  onRoomError
+}) {
+  const { isPremium, isGuest, authFetch, user, logout, token } = useAuth();
 
+  const [roomId, setRoomId] = useState(initialRoomId);
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
   const [activeTool, setActiveTool] = useState('selection');
-  const [lessonName, setLessonName] = useState('Lezione Senza Titolo');
+  const [lessonName, setLessonName] = useState('Nuova Lezione');
   const [isConnected, setIsConnected] = useState(false);
   const [usersCount, setUsersCount] = useState(1);
   const [userRole, setUserRole] = useState(isPremium ? 'teacher' : 'student');
@@ -43,6 +48,13 @@ export default function Whiteboard() {
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
   const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  // Sincronizza roomId con prop esterna se cambia
+  useEffect(() => {
+    if (initialRoomId && initialRoomId !== roomId) {
+      setRoomId(initialRoomId);
+    }
+  }, [initialRoomId]);
 
   // ----------------------------------------------------
   // GESTIONE MULTI-PAGINA (Frame Stile Google Jamboard)
@@ -62,6 +74,8 @@ export default function Whiteboard() {
   pagesRef.current = pages;
   const currentPageIndexRef = useRef(currentPageIndex);
   currentPageIndexRef.current = currentPageIndex;
+  const roomIdRef = useRef(roomId);
+  roomIdRef.current = roomId;
 
   const socketRef = useRef(null);
   const isRemoteUpdateRef = useRef(false);
@@ -114,9 +128,12 @@ export default function Whiteboard() {
   }, [excalidrawAPI]);
 
   // ----------------------------------------------------
-  // INIZIALIZZAZIONE WEBSOCKET
+  // INIZIALIZZAZIONE WEBSOCKET CON STANZA (Multi-Room)
+  // Connessione attiva solo se è definito roomId!
   // ----------------------------------------------------
   useEffect(() => {
+    if (!roomId) return;
+
     const socket = io(backendUrl, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,
@@ -127,19 +144,41 @@ export default function Whiteboard() {
 
     socket.on('connect', () => {
       setIsConnected(true);
+      // Invia join-room con il codice stanza specifico
+      socket.emit('join-room', {
+        roomId,
+        lessonName
+      });
     });
 
     socket.on('disconnect', () => {
       setIsConnected(false);
     });
 
+    // Errore: stanza non trovata o evaporata (per guest)
+    socket.on('room-not-found', (data) => {
+      console.warn('[Socket] Stanza non trovata:', data);
+      if (onRoomError) {
+        onRoomError(data.message || 'Questa lezione non è più disponibile. Chiedi un nuovo link al docente.');
+      }
+    });
+
+    socket.on('action-denied', (data) => {
+      showToast(data.message || 'Azione non consentita in modalità Ospite.', 'error');
+    });
+
     socket.on('users-count', (count) => {
       setUsersCount(count);
     });
 
-    // Inizializzazione scena (supporta sia v1 a pagina singola sia v2 multi-pagina)
+    // Inizializzazione scena della stanza specifica
     socket.on('init-scene', (sceneData) => {
       if (!sceneData || !excalidrawAPI) return;
+
+      if (sceneData.roomId) {
+        setRoomId(sceneData.roomId);
+        roomIdRef.current = sceneData.roomId;
+      }
 
       if (Array.isArray(sceneData.pages) && sceneData.pages.length > 0) {
         setPages(sceneData.pages);
@@ -149,7 +188,6 @@ export default function Whiteboard() {
         currentPageIndexRef.current = targetIdx;
         loadPageIntoCanvas(sceneData.pages[targetIdx]);
       } else if (sceneData.elements) {
-        // Fallback retrocompatibile v1
         const initialPage = {
           id: 'page-1',
           title: 'Pagina 1',
@@ -173,7 +211,6 @@ export default function Whiteboard() {
       if (!data || !excalidrawAPI) return;
       const incomingPageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : 0;
 
-      // Aggiorna lo stato della pagina nella cache
       if (pagesRef.current[incomingPageIndex]) {
         pagesRef.current[incomingPageIndex].elements = data.elements || [];
         if (data.files) {
@@ -184,7 +221,6 @@ export default function Whiteboard() {
         }
       }
 
-      // Se l'aggiornamento riguarda la pagina attualmente visibile dall'utente, renderizza a video
       if (incomingPageIndex === currentPageIndexRef.current) {
         isRemoteUpdateRef.current = true;
         try {
@@ -272,7 +308,7 @@ export default function Whiteboard() {
     return () => {
       socket.disconnect();
     };
-  }, [excalidrawAPI, backendUrl, loadPageIntoCanvas, token]);
+  }, [excalidrawAPI, backendUrl, roomId, loadPageIntoCanvas, token, onRoomError]);
 
   // ----------------------------------------------------
   // GESTIONE CAMBIO SCENA CON THROTTLE
@@ -284,7 +320,6 @@ export default function Whiteboard() {
       const currentVersion = computeSceneVersion(elements);
       if (currentVersion === lastSceneVersionRef.current) return;
 
-      // Aggiorna la memoria locale della pagina corrente
       const activeIdx = currentPageIndexRef.current;
       if (pagesRef.current[activeIdx]) {
         pagesRef.current[activeIdx].elements = elements;
@@ -329,7 +364,6 @@ export default function Whiteboard() {
   const handlePageChange = (targetIndex) => {
     if (!excalidrawAPI || targetIndex < 0 || targetIndex >= pages.length) return;
 
-    // 1. Salva lo stato della pagina attuale prima di voltare pagina
     const currentElements = excalidrawAPI.getSceneElements();
     const currentFiles = excalidrawAPI.getFiles();
 
@@ -343,25 +377,21 @@ export default function Whiteboard() {
     pagesRef.current = updatedPages;
     setPages(updatedPages);
 
-    // 2. Passa alla nuova pagina
     setCurrentPageIndex(targetIndex);
     currentPageIndexRef.current = targetIndex;
     loadPageIntoCanvas(updatedPages[targetIndex]);
 
-    // 3. Sincronizza tutti gli studenti
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('page-change', { pageIndex: targetIndex });
     }
   };
 
   const handleAddPage = () => {
-    // Solo Premium può aggiungere pagine
     if (!isPremium) {
       showToast('🔒 Gestione pagine disponibile solo per utenti Premium', 'error');
       return;
     }
 
-    // 1. Salva sempre lo stato della pagina attuale prima di crearne una nuova
     if (excalidrawAPI) {
       const currentElements = excalidrawAPI.getSceneElements();
       const currentFiles = excalidrawAPI.getFiles();
@@ -372,7 +402,6 @@ export default function Whiteboard() {
       };
     }
 
-    // 2. Crea la nuova pagina vuota
     const newPage = {
       id: `page-${Date.now()}`,
       title: `Pagina ${pagesRef.current.length + 1}`,
@@ -383,13 +412,11 @@ export default function Whiteboard() {
     const nextPages = [...pagesRef.current, newPage];
     const nextIndex = nextPages.length - 1;
 
-    // 3. Aggiorna IMMEDIATAMENTE lo stato locale su questo client
     pagesRef.current = nextPages;
     setPages(nextPages);
     currentPageIndexRef.current = nextIndex;
     setCurrentPageIndex(nextIndex);
 
-    // 4. Resetta il canvas per la nuova pagina
     if (excalidrawAPI) {
       isRemoteUpdateRef.current = true;
       excalidrawAPI.resetScene();
@@ -399,7 +426,6 @@ export default function Whiteboard() {
       }, 100);
     }
 
-    // 5. Invia al server Socket.io per allineare gli altri partecipanti
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('page-add', {
         pages: nextPages,
@@ -614,51 +640,58 @@ export default function Whiteboard() {
     reader.readAsDataURL(file);
   };
 
-  // ----------------------------------------------------
-  // NUOVA LEZIONE (Solo Premium): svuota la lavagna condivisa e la rinomina,
-  // utile per passare da un corso all'altro mantenendo lezioni separate su Drive.
-  // ----------------------------------------------------
-  const handleNewLesson = () => {
-    if (!isPremium) {
-      showToast('🔒 Creare una nuova lezione è disponibile solo per utenti Premium', 'error');
-      return;
-    }
-
-    if (!window.confirm('Creare una nuova lezione vuota? Se vuoi conservare quella attuale, salvala prima su Drive.')) {
-      return;
-    }
+  // Creazione di una NUOVA lezione (con nuovo roomId generato dal backend)
+  const handleNewLesson = async () => {
+    if (!isPremium) return;
 
     const newName = window.prompt('Nome della nuova lezione:', 'Nuova Lezione');
     if (newName === null) return;
     const finalName = newName.trim() || 'Nuova Lezione';
 
-    const blankPage = {
-      id: `page-${Date.now()}`,
-      title: 'Pagina 1',
-      elements: [],
-      files: {}
-    };
+    try {
+      // Chiama il backend per generare il nuovo roomId univoco dallo slug
+      const res = await authFetch(`${backendUrl}/api/rooms/create`, {
+        method: 'POST',
+        body: JSON.stringify({ lessonName: finalName })
+      });
+      const data = await res.json();
 
-    pagesRef.current = [blankPage];
-    setPages([blankPage]);
-    currentPageIndexRef.current = 0;
-    setCurrentPageIndex(0);
-    setLessonName(finalName);
+      if (data.success && data.roomId) {
+        const blankPage = {
+          id: `page-${Date.now()}`,
+          title: 'Pagina 1',
+          elements: [],
+          files: {}
+        };
 
-    if (excalidrawAPI) {
-      isRemoteUpdateRef.current = true;
-      excalidrawAPI.resetScene();
-      lastSceneVersionRef.current = 0;
-      setTimeout(() => {
-        isRemoteUpdateRef.current = false;
-      }, 100);
+        pagesRef.current = [blankPage];
+        setPages([blankPage]);
+        currentPageIndexRef.current = 0;
+        setCurrentPageIndex(0);
+        setLessonName(finalName);
+        setRoomId(data.roomId);
+        roomIdRef.current = data.roomId;
+
+        if (excalidrawAPI) {
+          isRemoteUpdateRef.current = true;
+          excalidrawAPI.resetScene();
+          lastSceneVersionRef.current = 0;
+          setTimeout(() => {
+            isRemoteUpdateRef.current = false;
+          }, 100);
+        }
+
+        // Notifica il componente genitore del cambio URL
+        if (onRoomChange) {
+          onRoomChange(data.roomId);
+        }
+
+        showToast(`📋 Creata nuova lezione: "${finalName}"`, 'success');
+      }
+    } catch (err) {
+      console.error('[ZenBoard] Errore creazione stanza:', err);
+      showToast('Errore durante la creazione della stanza sul server.', 'error');
     }
-
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit('new-lesson', { lessonName: finalName });
-    }
-
-    showToast(`📋 Nuova lezione creata: "${finalName}"`, 'success');
   };
 
   const handleClearBoard = () => {
@@ -674,6 +707,7 @@ export default function Whiteboard() {
   const handleUndo = () => excalidrawAPI?.history?.undo();
   const handleRedo = () => excalidrawAPI?.history?.redo();
 
+  // Rinomina titolo (Il roomId resta invariato!)
   const handleUpdateLessonName = (newName) => {
     if (!isPremium) {
       showToast('🔒 Rinominare la lezione è disponibile solo per utenti Premium', 'error');
@@ -711,10 +745,7 @@ export default function Whiteboard() {
         format: [1920, 1080]
       });
 
-      // Esporta tutte le pagine
       const allPages = [...pagesRef.current];
-
-      // Aggiorna la pagina corrente con gli elementi attuali
       allPages[currentPageIndexRef.current] = {
         ...allPages[currentPageIndexRef.current],
         elements: excalidrawAPI.getSceneElements(),
@@ -731,7 +762,6 @@ export default function Whiteboard() {
         if (pageElements.length === 0) continue;
 
         try {
-          // Usa exportToBlob di Excalidraw per generare un'immagine della pagina
           const blob = await exportToBlob({
             elements: pageElements,
             appState: {
@@ -755,7 +785,6 @@ export default function Whiteboard() {
           URL.revokeObjectURL(imgUrl);
         } catch (exportErr) {
           console.warn(`[ZenBoard] Errore export pagina ${i + 1}:`, exportErr);
-          // Pagina vuota nel PDF se l'export fallisce
           pdf.setFontSize(24);
           pdf.text(`Pagina ${i + 1} - ${page.title || ''}`, 60, 60);
         }
@@ -784,7 +813,6 @@ export default function Whiteboard() {
 
     setIsSaving(true);
     try {
-      // Aggiorna gli elementi della pagina corrente prima del salvataggio
       const currentElements = excalidrawAPI.getSceneElements();
       const currentFiles = excalidrawAPI.getFiles();
       const appState = excalidrawAPI.getAppState();
@@ -803,6 +831,7 @@ export default function Whiteboard() {
         body: JSON.stringify({
           filename,
           lessonName,
+          roomId: roomIdRef.current,
           pages: finalPages,
           currentPageIndex: currentPageIndexRef.current,
           appState: {
@@ -826,7 +855,7 @@ export default function Whiteboard() {
     }
   };
 
-  const handleLoadFromDrive = async (filename) => {
+  const handleLoadFromDrive = async (filename, loadedRoomId) => {
     if (!excalidrawAPI || !isPremium) return;
 
     try {
@@ -835,7 +864,8 @@ export default function Whiteboard() {
       const result = await response.json();
 
       if (result.success && result.data) {
-        const { pages: loadedPages, lessonName: loadedLessonName } = result.data;
+        const { pages: loadedPages, lessonName: loadedLessonName, roomId: fileRoomId } = result.data;
+        const finalRoomId = fileRoomId || loadedRoomId;
 
         if (Array.isArray(loadedPages) && loadedPages.length > 0) {
           setPages(loadedPages);
@@ -847,6 +877,14 @@ export default function Whiteboard() {
 
         if (loadedLessonName) {
           setLessonName(loadedLessonName);
+        }
+
+        if (finalRoomId) {
+          setRoomId(finalRoomId);
+          roomIdRef.current = finalRoomId;
+          if (onRoomChange) {
+            onRoomChange(finalRoomId);
+          }
         }
 
         setIsFilesModalOpen(false);
@@ -862,10 +900,11 @@ export default function Whiteboard() {
 
   return (
     <div className="flex flex-col w-screen h-screen overflow-hidden bg-slate-50 select-none">
-      {/* 1. Header Superiore ZenBoard (Altezza fissa, mai sovrapposto al canvas) */}
+      {/* 1. Header Superiore ZenBoard */}
       <Header
         lessonName={lessonName}
         onUpdateLessonName={handleUpdateLessonName}
+        roomId={roomId}
         isConnected={isConnected}
         usersCount={usersCount}
         onOpenSaveModal={isPremium ? () => setIsSaveModalOpen(true) : null}
@@ -888,7 +927,7 @@ export default function Whiteboard() {
         userDisplayName={user?.displayName || (isPremium ? 'Docente' : 'Ospite')}
       />
 
-      {/* 2. Area Canvas della Lavagna (Occupa tutto lo spazio rimanente) */}
+      {/* 2. Area Canvas della Lavagna */}
       <div className="relative flex-1 w-full h-[calc(100vh-3.25rem)]">
         {/* Toolbar Galleggiante Jamboard */}
         <Toolbar
@@ -932,7 +971,7 @@ export default function Whiteboard() {
         </div>
       </div>
 
-      {/* Modali Premium (Solo visibili per utenti autenticati) */}
+      {/* Modali Premium */}
       {isPremium && (
         <>
           <SaveModal

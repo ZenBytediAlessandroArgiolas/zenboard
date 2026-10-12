@@ -16,18 +16,21 @@ import {
   Lock,
   Shield,
   Loader2,
-  FilePlus2
+  PlusCircle,
+  Hash
 } from 'lucide-react';
 import PageNavigator from './PageNavigator';
 
 export default function Header({
   lessonName,
   onUpdateLessonName,
+  roomId,
   isConnected,
   usersCount,
   onOpenSaveModal,
   onOpenFilesModal,
   onQuickSave,
+  onNewLesson,
   isSaving,
   userRole,
   onToggleRole,
@@ -41,8 +44,7 @@ export default function Header({
   onExportPdf,
   isExportingPdf,
   onLogout,
-  userDisplayName,
-  onNewLesson
+  userDisplayName
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [tempTitle, setTempTitle] = useState(lessonName);
@@ -59,8 +61,13 @@ export default function Header({
   };
 
   const handleShare = () => {
-    const currentUrl = window.location.href;
-    navigator.clipboard.writeText(currentUrl).then(() => {
+    const origin = window.location.origin;
+    const pathname = window.location.pathname;
+    const shareUrl = roomId
+      ? `${origin}${pathname}?lezione=${encodeURIComponent(roomId)}`
+      : window.location.href;
+
+    navigator.clipboard.writeText(shareUrl).then(() => {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2500);
     });
@@ -78,7 +85,7 @@ export default function Header({
 
   return (
     <header className="w-full h-13 px-4 py-2 bg-white/95 border-b border-slate-200/80 relative z-10 flex items-center justify-between gap-4 shadow-xs flex-shrink-0">
-      {/* Sezione Sinistra: Logo ZenByte & Nome ZenBoard + Titolo Lezione */}
+      {/* Sezione Sinistra: Logo ZenByte & Nome ZenBoard + Titolo Lezione + Codice Stanza */}
       <div className="flex items-center gap-2.5 flex-shrink-0">
         <div className="flex items-center gap-2">
           <img
@@ -99,7 +106,7 @@ export default function Header({
         <div className="h-4 w-px bg-slate-200 hidden sm:block mx-1" />
 
         {/* Titolo Lezione Modificabile al volo (Solo Premium) */}
-        <div className="flex items-center">
+        <div className="flex items-center gap-2">
           {isPremium && isEditingTitle ? (
             <form onSubmit={handleTitleSubmit} className="flex items-center gap-1">
               <input
@@ -112,7 +119,7 @@ export default function Header({
               />
               <button
                 type="submit"
-                className="p-0.5 text-emerald-600 hover:bg-emerald-50 rounded"
+                className="p-0.5 text-emerald-600 hover:bg-emerald-50 rounded cursor-pointer"
               >
                 <Check className="w-3.5 h-3.5" />
               </button>
@@ -134,6 +141,17 @@ export default function Header({
               <span className="max-w-[120px] md:max-w-[200px] truncate">{lessonName}</span>
               {isPremium && <Edit2 className="w-3 h-3 text-slate-400" />}
             </button>
+          )}
+
+          {/* Badge pillola con codice stanza */}
+          {roomId && (
+            <span
+              title={`Codice stanza per studenti: ${roomId}`}
+              className="hidden lg:flex items-center gap-1 text-[11px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200/70"
+            >
+              <Hash className="w-2.5 h-2.5 opacity-60" />
+              <span>{roomId}</span>
+            </span>
           )}
         </div>
       </div>
@@ -159,7 +177,7 @@ export default function Header({
           onClick={onExportPdf}
           disabled={isExportingPdf}
           title="Scarica la lezione come PDF"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200/70 bg-slate-100/90 hover:bg-sky-100 hover:border-sky-300 text-slate-700 hover:text-sky-700 text-xs font-medium transition-all disabled:opacity-50"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200/70 bg-slate-100/90 hover:bg-sky-100 hover:border-sky-300 text-slate-700 hover:text-sky-700 text-xs font-medium transition-all disabled:opacity-50 cursor-pointer"
         >
           {isExportingPdf ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -174,7 +192,7 @@ export default function Header({
           <button
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             title="Gestione sessione, Google Drive e condivisione"
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all duration-150 ${
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all duration-150 cursor-pointer ${
               isMenuOpen
                 ? 'bg-slate-900 text-white border-slate-900 shadow-md'
                 : 'bg-slate-100/90 text-slate-700 hover:bg-slate-200/90 hover:text-slate-900 border-slate-200/70'
@@ -192,7 +210,7 @@ export default function Header({
               )}
             </span>
 
-            {/* Conteggio Utenti Online */}
+            {/* Conteggio Utenti Online nella stanza */}
             <div className="flex items-center gap-1 font-semibold">
               <Users className="w-3.5 h-3.5 opacity-70" />
               <span>{usersCount}</span>
@@ -221,7 +239,7 @@ export default function Header({
 
           {/* POPUP CARD MODERNO ESPANDIBILE */}
           {isMenuOpen && (
-            <div className="absolute right-0 top-11 w-80 bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/90 p-4 z-50 animate-fade-in-slide flex flex-col gap-3">
+            <div className="absolute right-0 top-11 w-84 bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/90 p-4 z-50 animate-fade-in-slide flex flex-col gap-3">
               {/* Header del Popup */}
               <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
                 <div className="flex items-center gap-2">
@@ -231,7 +249,7 @@ export default function Header({
                       Pannello ZenBoard
                     </h4>
                     <span className="text-[10px] text-slate-400">
-                      {isPremium ? 'Accesso Premium' : 'Modalità Ospite'}
+                      {isPremium ? 'Accesso Docente' : 'Modalità Ospite'}
                     </span>
                   </div>
                 </div>
@@ -268,7 +286,7 @@ export default function Header({
                     <p className="text-xs font-semibold text-slate-800">
                       {usersCount} {usersCount === 1 ? 'partecipante' : 'partecipanti'}
                     </p>
-                    <p className="text-[10px] text-slate-400">in tempo reale</p>
+                    <p className="text-[10px] text-slate-400">nella stanza live</p>
                   </div>
                 </div>
 
@@ -278,71 +296,92 @@ export default function Header({
                     ? 'bg-amber-50 text-amber-800 border-amber-200/60'
                     : 'bg-sky-50 text-sky-800 border-sky-200/60'
                 }`}>
-                  {isPremium ? '🔐 Premium' : '🔓 Ospite'}
+                  {isPremium ? '🔐 Docente' : '🔓 Ospite'}
                 </div>
               </div>
 
-              {/* Nuova Lezione (Solo Premium): svuota la lavagna per iniziare un nuovo corso */}
-              {isPremium && onNewLesson && (
-                <button
-                  onClick={() => {
-                    onNewLesson();
-                    setIsMenuOpen(false);
-                  }}
-                  className="flex items-center gap-2 w-full px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
-                >
-                  <FilePlus2 className="w-4 h-4 text-amber-600" />
-                  <span>Nuova Lezione (lavagna vuota)</span>
-                </button>
+              {/* Informazione Codice Stanza */}
+              {roomId && (
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Hash className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="text-[11px] text-slate-500">Stanza:</span>
+                    <span className="text-[11px] font-mono font-bold text-slate-800">{roomId}</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400">isolata per classe</span>
+                </div>
               )}
 
-              {/* Azioni Cloud Google Drive (Solo Premium) */}
-              {isPremium && onQuickSave && (
+              {/* Azioni Docente: Nuova Lezione e Google Drive */}
+              {isPremium && (
                 <div className="flex flex-col gap-2">
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">
-                    Archiviazione Google Drive
+                    Gestione Lezioni
                   </span>
 
+                  {/* Pulsante Nuova Lezione per nuova classe */}
+                  {onNewLesson && (
+                    <button
+                      onClick={() => {
+                        onNewLesson();
+                        setIsMenuOpen(false);
+                      }}
+                      className="flex items-center justify-between w-full px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-all cursor-pointer border border-slate-200"
+                    >
+                      <div className="flex items-center gap-2">
+                        <PlusCircle className="w-4 h-4 text-amber-600" />
+                        <span>Nuova Lezione (Nuova Classe)</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400">+ Nuova</span>
+                    </button>
+                  )}
+
                   {/* Salva su Drive */}
-                  <button
-                    onClick={() => {
-                      onQuickSave();
-                      setIsMenuOpen(false);
-                    }}
-                    disabled={isSaving}
-                    className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white text-xs font-semibold shadow-sm shadow-amber-600/20 active:scale-[0.98] transition-all disabled:opacity-50"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Save className="w-4 h-4" />
-                      <span>{isSaving ? 'Salvataggio...' : 'Salva Lezione su Drive'}</span>
-                    </div>
-                    <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-mono">
-                      .json
-                    </span>
-                  </button>
+                  {onQuickSave && (
+                    <button
+                      onClick={() => {
+                        onQuickSave();
+                        setIsMenuOpen(false);
+                      }}
+                      disabled={isSaving}
+                      className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white text-xs font-semibold shadow-sm shadow-amber-600/20 active:scale-[0.98] transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Save className="w-4 h-4" />
+                        <span>{isSaving ? 'Salvataggio...' : 'Salva Lezione su Drive'}</span>
+                      </div>
+                      <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-mono">
+                        .json
+                      </span>
+                    </button>
+                  )}
 
                   <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => {
-                        onOpenSaveModal();
-                        setIsMenuOpen(false);
-                      }}
-                      className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors"
-                    >
-                      <HardDrive className="w-3.5 h-3.5" />
-                      <span>Salva con nome</span>
-                    </button>
+                    {onOpenSaveModal && (
+                      <button
+                        onClick={() => {
+                          onOpenSaveModal();
+                          setIsMenuOpen(false);
+                        }}
+                        className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors cursor-pointer"
+                      >
+                        <HardDrive className="w-3.5 h-3.5" />
+                        <span>Salva con nome</span>
+                      </button>
+                    )}
 
-                    <button
-                      onClick={() => {
-                        onOpenFilesModal();
-                        setIsMenuOpen(false);
-                      }}
-                      className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors"
-                    >
-                      <FolderOpen className="w-3.5 h-3.5" />
-                      <span>Apri Lezioni</span>
-                    </button>
+                    {onOpenFilesModal && (
+                      <button
+                        onClick={() => {
+                          onOpenFilesModal();
+                          setIsMenuOpen(false);
+                        }}
+                        className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors cursor-pointer"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                        <span>Apri Lezioni</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -360,7 +399,7 @@ export default function Header({
                       setIsMenuOpen(false);
                     }}
                     disabled={isExportingPdf}
-                    className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-sky-600 to-sky-700 hover:from-sky-700 hover:to-sky-800 text-white text-xs font-semibold shadow-sm shadow-sky-600/20 active:scale-[0.98] transition-all disabled:opacity-50"
+                    className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-sky-600 to-sky-700 hover:from-sky-700 hover:to-sky-800 text-white text-xs font-semibold shadow-sm shadow-sky-600/20 active:scale-[0.98] transition-all disabled:opacity-50 cursor-pointer"
                   >
                     <div className="flex items-center gap-2">
                       <Download className="w-4 h-4" />
@@ -374,7 +413,7 @@ export default function Header({
                   <div className="p-2.5 rounded-xl bg-sky-50/70 border border-sky-200/50 text-[10px] text-sky-900 leading-tight flex items-start gap-1.5">
                     <Lock className="w-3 h-3 flex-shrink-0 mt-0.5" />
                     <span>
-                      Il salvataggio su Google Drive, la gestione pagine e la modifica del titolo richiedono l'accesso <strong>Premium</strong> (Docente).
+                      Il salvataggio su Google Drive e la gestione pagine sono riservati al Docente.
                     </span>
                   </div>
                 </div>
@@ -382,14 +421,14 @@ export default function Header({
 
               <div className="h-px bg-slate-100 my-0.5" />
 
-              {/* Condivisione Sessione */}
+              {/* Condivisione Sessione (Link specifico con ?lezione=codice) */}
               <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">
                   Condivisione
                 </span>
                 <button
                   onClick={handleShare}
-                  className={`flex items-center justify-between w-full px-3.5 py-2 rounded-xl text-xs font-medium transition-all ${
+                  className={`flex items-center justify-between w-full px-3.5 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer ${
                     copiedLink
                       ? 'bg-emerald-500 text-white shadow-xs'
                       : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -403,20 +442,13 @@ export default function Header({
                 </button>
               </div>
 
-              {/* Footer Info + Logout */}
-              {isPremium ? (
-                <div className="p-2 rounded-xl bg-amber-50/70 border border-amber-200/50 text-[10px] text-amber-900 leading-tight">
-                  💡 <strong>Zero-API Cloud:</strong> File salvati in <code className="font-mono">/app/data</code>, sincronizzati su Google Drive locale.
-                </div>
-              ) : null}
-
               {/* Pulsante Logout / Cambia Modalità */}
               <button
                 onClick={() => {
                   onLogout();
                   setIsMenuOpen(false);
                 }}
-                className="flex items-center gap-2 w-full px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 text-xs font-medium transition-colors border border-slate-200/60 hover:border-rose-200"
+                className="flex items-center gap-2 w-full px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 text-xs font-medium transition-colors border border-slate-200/60 hover:border-rose-200 cursor-pointer"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 <span>{isPremium ? 'Esci (Logout)' : 'Torna al Login'}</span>

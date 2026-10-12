@@ -38,6 +38,8 @@ JWT_EXPIRY=24h
 
 > ⚠️ **Importante**: i valori di default (`docente` / `zenboard2024`) servono solo per lo sviluppo in locale. Se condividi ZenBoard oltre la tua rete (es. con ngrok / Cloudflare Tunnel), cambia **sempre** `ADMIN_PASSWORD` e `JWT_SECRET` prima di farlo. Il backend stampa un avviso in console all'avvio se sta ancora usando i valori predefiniti.
 
+> 💡 **Architettura Multi-Stanza (Isolamento per Classe)**: ZenBoard gestisce lavagne isolate tramite stanze (`Map<roomId, RoomState>`). Il codice stanza è generato automaticamente dal titolo della lezione (es. "Matematica 3A" → `matematica-3a`), resta fisso per l'intera sessione e permette di condividere link diretti per classe (`?lezione=matematica-3a`). Le stanze inattive in RAM vengono ripulite automaticamente dopo 72 ore; le lezioni salvate su Drive preservano il loro codice-stanza al ricaricamento.
+
 ---
 
 ## 🛠️ Stack Tecnologico
@@ -54,9 +56,11 @@ JWT_EXPIRY=24h
 ```
 zenboard/ (lavagna_digitale/)
 ├── docker-compose.yml          # Orchestrazione container, mapping porte e volumi
-├── .env.example                # Modello per configurazione ambiente e percorso Drive
-├── .env                        # File di configurazione locale
+├── .env.example                # Modello per configurazione ambiente, Drive e Vercel/tunnel
+├── .env                        # File di configurazione locale (MAI committato)
+├── .gitignore                  # Esclude node_modules, .env, dist, lezioni salvate
 ├── README.md                   # Documentazione completa
+├── restart-tunnel.ps1          # Script: riavvia il tunnel Cloudflare e aggiorna Vercel in un comando
 ├── data/                       # Directory locale di fallback per le lezioni (.json)
 ├── backend/
 │   ├── Dockerfile              # Dockerfile per il servizio Node.js
@@ -82,6 +86,8 @@ zenboard/ (lavagna_digitale/)
         └── components/
             ├── Whiteboard.jsx  # Motore lavagna con Excalidraw, Socket.io e gestione Drive
             ├── LoginPage.jsx   # Schermata di accesso: tab Docente Premium / Ospite
+            ├── TeacherHub.jsx  # Hub iniziale Docente: Nuova Lezione / Apri da Drive
+            ├── GuestJoinScreen.jsx # Schermata codice per Ospite (link nudo o stanza scaduta)
             ├── Toolbar.jsx     # Toolbar semplificata (Penna, Evidenziatore, Gomma, Immagini)
             ├── Header.jsx      # Barra superiore compatta con logo ZenByte e popup menu
             ├── PageNavigator.jsx # Navigatore Frame/Pagine stile Google Jamboard (< 1 / N >)
@@ -120,12 +126,47 @@ docker compose up --build
 
 ### 2. Gestione Multi-Pagina (Frame Jamboard)
 - Navigatore in alto al centro: `< 1 / 4 >`.
-- Aggiunta di nuovi fogli bianchi con `+ Nuova`.
-- Possibilità di duplicare o eliminare singole slide.
+- Aggiunta di nuovi fogli bianchi con `+ Nuova` (Solo Premium — gli Ospiti vedono i controlli bloccati con lucchetto).
+- Possibilità di duplicare o eliminare singole slide (Solo Premium).
 - **Voltagiri sincronizzato**: quando il docente cambia pagina, tutti gli studenti connessi vengono portati automaticamente sulla nuova pagina.
+- Tutte le azioni di gestione pagine sono verificate anche **lato server** (non solo nell'interfaccia) tramite il token JWT passato in fase di connessione WebSocket.
 
-### 3. Strumenti Didattici Immediati
+### 3. Nuova Lezione (Solo Premium)
+- Pulsante dedicato nel pannello ZenBoard: svuota la lavagna condivisa e la rinomina, utile per passare da un corso all'altro (es. da "Matematica 3A" a "Inglese 2B") mantenendo le lezioni precedenti salvabili separatamente su Drive.
+- Richiede conferma prima di procedere, per evitare di perdere lavoro non salvato.
+
+### 4. Strumenti Didattici Immediati
 - **Penna (Freedraw)**: inchiostro scuro fluido.
 - **Evidenziatore**: tratto fluorescente semitrasparente (35% opacità) per marcare testi e formule senza coprirli.
 - **Gomma**: cancellazione rapida.
 - **Immagini**: supporto caricamento file picker e **Drag & Drop** diretto sul canvas.
+
+---
+
+## ☁️ Pubblicazione Online (Frontend su Vercel + Backend locale)
+
+ZenBoard può essere pubblicato con un indirizzo web pubblico mantenendo il backend (Socket.io + salvataggio lezioni) sul PC del docente, secondo il modello "docente come host" descritto sopra:
+
+- **Frontend**: build statica React/Vite pubblicata su **Vercel** (piano gratuito)
+- **Backend**: resta su Docker, sul PC del docente, esposto pubblicamente tramite un **Cloudflare Tunnel** ("quick tunnel", gratuito)
+- Il frontend su Vercel comunica col backend tramite la variabile d'ambiente `VITE_BACKEND_URL`, impostata sull'URL pubblico generato dal tunnel
+
+**Limite del tunnel gratuito**: un "quick tunnel" Cloudflare genera un URL casuale (`https://xxxx.trycloudflare.com`) che può cambiare o smettere di funzionare se il tunnel viene riavviato (es. dopo un riavvio del PC). Essendo `VITE_BACKEND_URL` "iniettata" nel codice al momento della build, ogni volta che l'URL cambia serve un nuovo deploy del frontend.
+
+### Script di automazione: `restart-tunnel.ps1`
+
+Per evitare di ripetere a mano tutti i passaggi, lo script `restart-tunnel.ps1` nella radice del progetto fa tutto con un comando: riavvia il tunnel Cloudflare, aggiorna `VITE_BACKEND_URL` su Vercel, pubblica un nuovo deploy via CLI (non dipende da GitHub, evitando eventuali rate-limit) e riaggancia il dominio personalizzato all'ultimo deploy.
+
+```powershell
+.\restart-tunnel.ps1
+```
+
+Richiede nel file `.env` locale (mai committato):
+```bash
+VERCEL_TOKEN=...   # Account Settings -> Tokens su vercel.com
+VERCEL_SCOPE=...   # Slug del team/account (visibile nell'URL del progetto Vercel)
+```
+
+(Il dominio personalizzato da riagganciare, es. `zenboard.zenbyte.it`, è impostato direttamente in cima allo script nella variabile `$CustomDomain`.)
+
+Usalo ogni volta che il sito pubblicato smette di connettersi al backend (segno che il tunnel è scaduto) — capita tipicamente dopo un riavvio del PC.
