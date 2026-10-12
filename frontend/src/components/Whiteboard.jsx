@@ -614,6 +614,53 @@ export default function Whiteboard() {
     reader.readAsDataURL(file);
   };
 
+  // ----------------------------------------------------
+  // NUOVA LEZIONE (Solo Premium): svuota la lavagna condivisa e la rinomina,
+  // utile per passare da un corso all'altro mantenendo lezioni separate su Drive.
+  // ----------------------------------------------------
+  const handleNewLesson = () => {
+    if (!isPremium) {
+      showToast('🔒 Creare una nuova lezione è disponibile solo per utenti Premium', 'error');
+      return;
+    }
+
+    if (!window.confirm('Creare una nuova lezione vuota? Se vuoi conservare quella attuale, salvala prima su Drive.')) {
+      return;
+    }
+
+    const newName = window.prompt('Nome della nuova lezione:', 'Nuova Lezione');
+    if (newName === null) return;
+    const finalName = newName.trim() || 'Nuova Lezione';
+
+    const blankPage = {
+      id: `page-${Date.now()}`,
+      title: 'Pagina 1',
+      elements: [],
+      files: {}
+    };
+
+    pagesRef.current = [blankPage];
+    setPages([blankPage]);
+    currentPageIndexRef.current = 0;
+    setCurrentPageIndex(0);
+    setLessonName(finalName);
+
+    if (excalidrawAPI) {
+      isRemoteUpdateRef.current = true;
+      excalidrawAPI.resetScene();
+      lastSceneVersionRef.current = 0;
+      setTimeout(() => {
+        isRemoteUpdateRef.current = false;
+      }, 100);
+    }
+
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('new-lesson', { lessonName: finalName });
+    }
+
+    showToast(`📋 Nuova lezione creata: "${finalName}"`, 'success');
+  };
+
   const handleClearBoard = () => {
     if (window.confirm('Vuoi ripulire la pagina attuale?')) {
       if (socketRef.current && socketRef.current.connected) {
@@ -824,6 +871,7 @@ export default function Whiteboard() {
         onOpenSaveModal={isPremium ? () => setIsSaveModalOpen(true) : null}
         onOpenFilesModal={isPremium ? () => setIsFilesModalOpen(true) : null}
         onQuickSave={isPremium ? () => handleSaveToDrive() : null}
+        onNewLesson={isPremium ? handleNewLesson : null}
         isSaving={isSaving}
         userRole={userRole}
         onToggleRole={handleToggleRole}

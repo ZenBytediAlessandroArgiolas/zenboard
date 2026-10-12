@@ -5,7 +5,8 @@ export default function FilesListModal({
   isOpen,
   onClose,
   onLoadLesson,
-  backendUrl
+  backendUrl,
+  authFetch
 }) {
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -15,7 +16,7 @@ export default function FilesListModal({
     setIsLoading(true);
     setError('');
     try {
-      const response = await fetch(`${backendUrl}/api/files`);
+      const response = await authFetch(`${backendUrl}/api/files`);
       const data = await response.json();
       if (data.success) {
         setFiles(data.files);

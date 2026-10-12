@@ -15,7 +15,8 @@ import {
   LogOut,
   Lock,
   Shield,
-  Loader2
+  Loader2,
+  FilePlus2
 } from 'lucide-react';
 import PageNavigator from './PageNavigator';
 
@@ -40,7 +41,8 @@ export default function Header({
   onExportPdf,
   isExportingPdf,
   onLogout,
-  userDisplayName
+  userDisplayName,
+  onNewLesson
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [tempTitle, setTempTitle] = useState(lessonName);
@@ -279,6 +281,20 @@ export default function Header({
                   {isPremium ? '🔐 Premium' : '🔓 Ospite'}
                 </div>
               </div>
+
+              {/* Nuova Lezione (Solo Premium): svuota la lavagna per iniziare un nuovo corso */}
+              {isPremium && onNewLesson && (
+                <button
+                  onClick={() => {
+                    onNewLesson();
+                    setIsMenuOpen(false);
+                  }}
+                  className="flex items-center gap-2 w-full px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
+                >
+                  <FilePlus2 className="w-4 h-4 text-amber-600" />
+                  <span>Nuova Lezione (lavagna vuota)</span>
+                </button>
+              )}
 
               {/* Azioni Cloud Google Drive (Solo Premium) */}
               {isPremium && onQuickSave && (

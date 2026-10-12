@@ -284,6 +284,28 @@ io.on('connection', (socket) => {
     });
   });
 
+  // 5bis. Nuova lezione: svuota la lavagna condivisa e la rinomina (es. per iniziare un nuovo corso)
+  socket.on('new-lesson', (data) => {
+    if (!requirePremiumSocket(socket)) return;
+    const lessonName = typeof data?.lessonName === 'string' && data.lessonName.trim()
+      ? data.lessonName.trim()
+      : 'Nuova Lezione';
+
+    currentScene.pages = [
+      {
+        id: `page-${Date.now()}`,
+        title: 'Pagina 1',
+        elements: [],
+        files: {}
+      }
+    ];
+    currentScene.currentPageIndex = 0;
+    currentScene.lessonName = lessonName;
+
+    console.log(`[Lezione] Nuova lezione creata da ${socket.data.username}: "${lessonName}"`);
+    socket.broadcast.emit('init-scene', currentScene);
+  });
+
   // 6. Cursori collaborativi
   socket.on('cursor-update', (cursorData) => {
     socket.broadcast.emit('cursor-update', {
